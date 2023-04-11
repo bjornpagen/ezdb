@@ -3,7 +3,7 @@ package ezdb
 import (
 	"bytes"
 	"encoding/gob"
-	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -11,9 +11,6 @@ import (
 	"github.com/rs/zerolog"
 	lmdb "wellquite.org/golmdb"
 )
-
-var ErrPutFailed = errors.New("failed to put key")
-var ErrGetFailed = errors.New("failed to get key")
 
 const mode = os.FileMode(0644)
 
@@ -55,10 +52,11 @@ func WithLogger(logger zerolog.Logger) Option {
 }
 
 type Client struct {
+	path    string
+	options *options
+
 	db       *lmdb.LMDBClient
-	path     string
 	initOnce sync.Once
-	options  *options
 }
 
 func New(path string, opts ...Option) (*Client, error) {
@@ -66,7 +64,7 @@ func New(path string, opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		err := opt(o)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to set options: %w", err)
 		}
 	}
 
@@ -89,10 +87,28 @@ func New(path string, opts ...Option) (*Client, error) {
 	}
 
 	return &Client{
-		db:      nil,
 		path:    path,
 		options: o,
 	}, nil
+}
+
+func (db *Client) init() error {
+	// Check if directory exists, if not create it.
+	if _, err := os.Stat(db.path); os.IsNotExist(err) {
+		err = os.MkdirAll(db.path, os.ModePerm)
+		if err != nil {
+			return fmt.Errorf("failed to create db directory: %w", err)
+		}
+	}
+
+	// Open DB.
+	newDB, err := lmdb.NewLMDB(*db.options.log, db.path, mode, *db.options.numReaders, *db.options.numDbs, lmdb.EnvironmentFlag(0), *db.options.batchSize)
+	if err != nil {
+		return fmt.Errorf("failed to open db: %w", err)
+	}
+
+	db.db = newDB
+	return nil
 }
 
 func (db *Client) Close() {
@@ -107,33 +123,19 @@ type DBRef[K, V any] struct {
 	// Worth looking into go-bolt for their pure byte implementation.
 }
 
-func (ref *DBRef[K, V]) Init(refID string, db *Client) (err error) {
+func (ref *DBRef[K, V]) Init(refID string, db *Client) error {
 	return initRef(ref, refID, db)
 }
 
-func initRef[K, V any](ref *DBRef[K, V], refID string, db *Client) (err error) {
+func initRef[K, V any](ref *DBRef[K, V], refID string, db *Client) error {
+	var err error
 	db.initOnce.Do(func() {
-		// Check if directory exists, if not create it.
-		if _, err := os.Stat(db.path); os.IsNotExist(err) {
-			err = os.MkdirAll(db.path, os.ModePerm)
-			if err != nil {
-				panic(errors.New("failed to create db directory: " + err.Error()))
-			}
-		}
-
-		// Open DB.
-		newDB, err := lmdb.NewLMDB(*db.options.log, db.path, mode, *db.options.numReaders, *db.options.numDbs, lmdb.EnvironmentFlag(0), *db.options.batchSize)
-		if err != nil {
-			panic(errors.New("failed to open db: " + err.Error()))
-		}
-		db.db = newDB
+		err = db.init()
 	})
-
-	if db.db == nil {
-		return errors.New("failed to initialize database")
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	// Now that we have a db, open the ref.
 	err = db.db.Update(func(txn *lmdb.ReadWriteTxn) error {
 		_, err := txn.DBRef(refID, lmdb.DatabaseFlag(0x40000))
 		if err != nil {
@@ -143,7 +145,7 @@ func initRef[K, V any](ref *DBRef[K, V], refID string, db *Client) (err error) {
 		return nil
 	})
 	if err != nil {
-		return errors.New("failed to open db ref: " + err.Error())
+		return fmt.Errorf("failed to open db ref: %w", err)
 	}
 
 	*ref = DBRef[K, V]{
@@ -158,30 +160,30 @@ func (ref *DBRef[K, V]) Put(key *K, val *V) (err error) {
 	err = ref.ownerDB.db.Update(func(txn *lmdb.ReadWriteTxn) error {
 		dbRef, err := txn.DBRef(ref.id, lmdb.DatabaseFlag(0))
 		if err != nil {
-			return errors.New("failed to get db ref: " + err.Error())
+			return fmt.Errorf("failed to get db ref: %w", err)
 		}
 
 		// Encode the key.
 		keyBuf, err := encode(key)
 		if err != nil {
-			return errors.New("failed to encode key: " + err.Error())
+			return fmt.Errorf("failed to encode key: %w", err)
 		}
 
 		// Encode the value.
 		valBuf, err := encode(val)
 		if err != nil {
-			return errors.New("failed to encode value: " + err.Error())
+			return fmt.Errorf("failed to encode value: %w", err)
 		}
 
 		err = txn.Put(dbRef, keyBuf.Bytes(), valBuf.Bytes(), lmdb.PutFlag(0))
 		if err != nil {
-			return errors.New("failed to put key: " + err.Error())
+			return fmt.Errorf("failed to put key/value pair: %w", err)
 		}
 
 		return nil
 	})
 	if err != nil {
-		return errors.Join(ErrPutFailed, err)
+		return err
 	}
 
 	return nil
@@ -191,31 +193,31 @@ func (ref *DBRef[K, V]) Get(key *K) (val *V, err error) {
 	err = ref.ownerDB.db.View(func(txn *lmdb.ReadOnlyTxn) error {
 		dbRef, err := txn.DBRef(ref.id, lmdb.DatabaseFlag(0))
 		if err != nil {
-			return errors.New("failed to get db ref: " + err.Error())
+			return fmt.Errorf("failed to get db ref: %w", err)
 		}
 
 		// Encode the key.
 		keyBuf, err := encode(key)
 		if err != nil {
-			return errors.New("failed to encode key: " + err.Error())
+			return fmt.Errorf("failed to encode key: %w", err)
 		}
 
 		// Get the value.
 		valBytes, err := txn.Get(dbRef, keyBuf.Bytes())
 		if err != nil {
-			return errors.New("failed to get key: " + err.Error())
+			return fmt.Errorf("failed to get key: %w", err)
 		}
 
 		// Decode the value.
 		err = decode(&val, bytes.NewReader(valBytes))
 		if err != nil {
-			return errors.New("failed to decode value: " + err.Error())
+			return fmt.Errorf("failed to decode value: %w", err)
 		}
 
 		return nil
 	})
 	if err != nil {
-		return new(V), errors.Join(ErrGetFailed, err)
+		return new(V), err
 	}
 
 	return val, nil
@@ -225,7 +227,7 @@ func encode[T any](val *T) (buf bytes.Buffer, err error) {
 	encoder := gob.NewEncoder(&buf)
 	err = encoder.Encode(val)
 	if err != nil {
-		return buf, errors.New("failed to encode value: " + err.Error())
+		return buf, err
 	}
 
 	return buf, nil
@@ -233,11 +235,11 @@ func encode[T any](val *T) (buf bytes.Buffer, err error) {
 
 // Decodes a value from a reader into a pointer to a value.
 // Will try and fail if the decoded type is not assignable to the thing we're decoding into.
-func decode[T any](val *T, r io.Reader) (err error) {
+func decode[T any](val *T, r io.Reader) error {
 	decoder := gob.NewDecoder(r)
-	err = decoder.Decode(val)
+	err := decoder.Decode(val)
 	if err != nil {
-		return errors.New("failed to decode value: " + err.Error())
+		return err
 	}
 
 	return nil
