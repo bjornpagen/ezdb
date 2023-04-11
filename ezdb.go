@@ -124,10 +124,6 @@ type DBRef[K, V any] struct {
 }
 
 func (ref *DBRef[K, V]) Init(refID string, db *Client) error {
-	return initRef(ref, refID, db)
-}
-
-func initRef[K, V any](ref *DBRef[K, V], refID string, db *Client) error {
 	var err error
 	db.initOnce.Do(func() {
 		err = db.init()
