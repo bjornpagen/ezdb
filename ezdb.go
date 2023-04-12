@@ -123,7 +123,17 @@ type DBRef[K, V any] struct {
 	// Worth looking into go-bolt for their pure byte implementation.
 }
 
-func (ref *DBRef[K, V]) Init(refID string, db *Client) error {
+func NewRef[K, V any](refID string, db *Client) (ref *DBRef[K, V], err error) {
+	ref = new(DBRef[K, V])
+	err = ref.init(refID, db)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize db ref: %w", err)
+	}
+
+	return ref, nil
+}
+
+func (ref *DBRef[K, V]) init(refID string, db *Client) error {
 	var err error
 	db.initOnce.Do(func() {
 		err = db.init()
