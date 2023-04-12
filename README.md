@@ -35,8 +35,7 @@ Create a reference to a new database:
 
 ```go
 // Create a new reference
-var ref ezdb.DBRef[string, string]
-err = ref.Init("refID", db)
+ref, err := ezdb.NewRef[string, string]("ref_id", db)
 if err != nil {
 	fmt.Println("error:", err)
 }
