@@ -52,7 +52,8 @@ if err = ref.Put(&key, &value); err != nil {
 }
 
 // Retrieve the value by key
-if valueOut, err := ref.Get(&key); err != nil {
+valueOut, err := ref.Get(&key)
+if err != nil {
 	fmt.Println("error:", err)
 }
 
